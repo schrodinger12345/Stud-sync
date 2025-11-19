@@ -23,6 +23,7 @@ export const GeminiChat = () => {
     },
   ]);
   const [inputValue, setInputValue] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { generateAsync, isGenerating } = useGemini();
 
@@ -54,6 +55,7 @@ export const GeminiChat = () => {
       console.log("Sending prompt to Gemini:", userInput);
       const response = await generateAsync(userInput);
       console.log("Received response from Gemini:", response);
+      setRetryCount(0);
       
       const geminiMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -64,13 +66,27 @@ export const GeminiChat = () => {
       setMessages((prev) => [...prev, geminiMessage]);
     } catch (error) {
       console.error("Error getting response from Gemini:", error);
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      
+      let friendlyMessage = "";
+      if (errorMsg.includes("overloaded") || errorMsg.includes("429") || errorMsg.includes("503")) {
+        friendlyMessage = "🔄 The AI assistant is currently busy. I've automatically retried several times. Please try again in a moment!";
+      } else if (errorMsg.includes("API key")) {
+        friendlyMessage = "❌ There's an issue with the API key configuration. Please check your settings.";
+      } else if (errorMsg.includes("404")) {
+        friendlyMessage = "❌ The AI model is not available. Please try again later.";
+      } else {
+        friendlyMessage = `❌ I encountered an error: ${errorMsg}. Please try again.`;
+      }
+      
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
-        text: `Sorry, I encountered an error: ${error instanceof Error ? error.message : "Unknown error"}. Please check your API key and try again.`,
+        text: friendlyMessage,
         sender: "gemini",
         timestamp: new Date(),
       };
       setMessages((prev) => [...prev, errorMessage]);
+      setRetryCount((prev) => prev + 1);
     }
   };
 

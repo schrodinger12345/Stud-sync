@@ -13,18 +13,59 @@ const genAI = new GoogleGenerativeAI(apiKey || "");
 // Use the correct model name for the Gemini API
 const DEFAULT_MODEL = "gemini-2.5-flash";
 
+// Retry configuration
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 500;
+const MAX_DELAY_MS = 30000;
+
+// Helper function for exponential backoff with jitter
+async function delay(attempt: number): Promise<void> {
+  const backoffMs = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * Math.pow(2, attempt - 1));
+  const jitter = Math.floor(Math.random() * Math.min(1000, backoffMs / 4));
+  const totalDelay = backoffMs + jitter;
+  console.log(`Retrying after ${totalDelay}ms (attempt ${attempt}/${MAX_RETRIES})`);
+  return new Promise((resolve) => setTimeout(resolve, totalDelay));
+}
+
+// Check if error is retryable (transient)
+function isRetryableError(error: any): boolean {
+  const errorMsg = error?.message || "";
+  // Check for rate limit, overload, or transient errors
+  return (
+    errorMsg.includes("429") ||
+    errorMsg.includes("503") ||
+    errorMsg.includes("overloaded") ||
+    errorMsg.includes("temporarily") ||
+    errorMsg.includes("RESOURCE_EXHAUSTED") ||
+    errorMsg.includes("unavailable")
+  );
+}
+
 export const geminiClient = {
   async generateText(prompt: string, model: string = DEFAULT_MODEL) {
-    try {
-      console.log("Using model:", model);
-      const generativeModel = genAI.getGenerativeModel({ model });
-      const result = await generativeModel.generateContent(prompt);
-      const response = await result.response;
-      return response.text();
-    } catch (error) {
-      console.error("Gemini API error:", error);
-      throw error;
+    let lastError: any;
+    
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`Gemini API call (attempt ${attempt}/${MAX_RETRIES}):`, model);
+        const generativeModel = genAI.getGenerativeModel({ model });
+        const result = await generativeModel.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+      } catch (error) {
+        lastError = error;
+        console.error(`Attempt ${attempt} failed:`, error);
+
+        if (!isRetryableError(error) || attempt === MAX_RETRIES) {
+          console.error("Gemini API error (non-retryable or max retries reached):", error);
+          throw error;
+        }
+
+        await delay(attempt);
+      }
     }
+
+    throw lastError || new Error("Max retries reached calling Gemini");
   },
 
   async generateWithStreaming(
@@ -32,21 +73,34 @@ export const geminiClient = {
     onChunk: (chunk: string) => void,
     model: string = DEFAULT_MODEL
   ) {
-    try {
-      console.log("Using model for streaming:", model);
-      const generativeModel = genAI.getGenerativeModel({ model });
-      const result = await generativeModel.generateContentStream(prompt);
+    let lastError: any;
 
-      for await (const chunk of result.stream) {
-        const text = chunk.text();
-        onChunk(text);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        console.log(`Gemini streaming call (attempt ${attempt}/${MAX_RETRIES}):`, model);
+        const generativeModel = genAI.getGenerativeModel({ model });
+        const result = await generativeModel.generateContentStream(prompt);
+
+        for await (const chunk of result.stream) {
+          const text = chunk.text();
+          onChunk(text);
+        }
+
+        return await result.response;
+      } catch (error) {
+        lastError = error;
+        console.error(`Streaming attempt ${attempt} failed:`, error);
+
+        if (!isRetryableError(error) || attempt === MAX_RETRIES) {
+          console.error("Gemini streaming error (non-retryable or max retries reached):", error);
+          throw error;
+        }
+
+        await delay(attempt);
       }
-
-      return await result.response;
-    } catch (error) {
-      console.error("Gemini streaming error:", error);
-      throw error;
     }
+
+    throw lastError || new Error("Max retries reached calling Gemini");
   },
 
   async analyzeText(text: string, analysisType: string = "general") {
